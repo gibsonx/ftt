@@ -183,10 +183,10 @@ bucket = create_bucket(bucket_name)
 down = DownloadObj(bucket_name,oldObj)
 
 state = iterative_process.initialize()
+ckpt_manager = FileCheckpointManager(CurrentPath)
 
 if down ==True:
     untar(oldObj)
-    ckpt_manager = FileCheckpointManager(CurrentPath)
     state = ckpt_manager.load_checkpoint(state,round_num=int(seq - 1))
 
 # for round_num in range(1, NUM_ROUNDS+1):
