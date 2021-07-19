@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 import pandas as pd
-from tensorflow_federated.python.simulation import FileCheckpointManager
+
 from tensorflow import reshape, nest, config
 from tensorflow.keras import losses, metrics, optimizers
 # Test the TFF is working:
@@ -18,31 +18,32 @@ import boto3
 from botocore.client import Config,ClientError
 import tarfile
 import urllib3
+import shutil
+from tensorflow_federated.python.simulation import FileCheckpointManager
 
-tff.federated_computation(lambda: 'Hello, World!')()
 print(tf.__version__)
+tff.federated_computation(lambda: 'Hello, World!')()
 
 
-seq = os.environ.get('seq')
-task_name = os.environ.get('task')
-bucket_name = str(os.environ.get('uuid'))
-# seq = 1
-# task_name = "test"
-# bucket_name = secrets.token_hex(nbytes=12)
-
+# seq = os.environ.get('seq')
+# task_name = os.environ.get('task')
+# bucket_name = str(os.environ.get('uuid'))
+seq = 2
+task_name = "gibson"
+bucket_name = "gibsonxue"
+#
 method = "tff_training"
 client_lr = 1e-2
 server_lr = 1e-2
-split = 10
+split = 1
 NUM_ROUNDS = 5
 NUM_EPOCHS = 5
 BATCH_SIZE = 1
 PREFETCH_BUFFER = 10
 
-root_path = '/opt/train/'
+data_path = '/opt/train/'
 
-
-df_orig_train = pd.read_csv(root_path + 'data.csv')
+df_orig_train = pd.read_csv(data_path + 'data.csv')
 # df_orig_test = pd.read_csv('mnist_test.csv')
 print(df_orig_train.shape[0])
 x_train = df_orig_train.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_train.shape[0],28,28,1)[:10]
@@ -70,14 +71,11 @@ sample_element = next(iter(sample_dataset))
 SHUFFLE_BUFFER = image_per_set
 
 def preprocess(dataset):
-
     def batch_format_fn(element):
-        """Flatten a batch `pixels` and return the features as an `OrderedDict`."""
         print(element['pixels'])
         return collections.OrderedDict(
             x=reshape(element['pixels'], [-1, 28, 28, 1]),
             y=reshape(element['label'], [-1, 1]))
-
     return dataset.repeat(NUM_EPOCHS).shuffle(SHUFFLE_BUFFER).batch(
         BATCH_SIZE).map(batch_format_fn).prefetch(PREFETCH_BUFFER)
 
@@ -116,45 +114,6 @@ def model_fn():
         loss=losses.SparseCategoricalCrossentropy(),
         metrics=[metrics.SparseCategoricalAccuracy()])
 
-iterative_process = tff.learning.build_federated_averaging_process(
-    model_fn,
-    client_optimizer_fn=lambda: optimizers.Adam(learning_rate=client_lr),
-    server_optimizer_fn=lambda: optimizers.SGD(learning_rate=server_lr))
-
-eval_model = None
-
-state = iterative_process.initialize()
-
-eval_model = None
-for round_num in range(1, NUM_ROUNDS+1):
-    state, tff_metrics = iterative_process.next(state, federated_train_data)
-    print('round {:2d}, metrics={}'.format(round_num, tff_metrics))
-
-filePath = root_path + str(bucket_name) + '/'
-
-ckpt_manager = FileCheckpointManager(filePath)
-ckpt_manager.save_checkpoint(state,round_num=int(seq))
-
-objFolder = 'ckpt_'+ str(seq)
-obj = 'ckpt_'+ str(seq) + '.tar.gz'
-
-tarPath =  filePath + objFolder
-tarFile = filePath  + obj
-
-def tardir(path, tar_name):
-    with tarfile.open(tar_name, "w:gz") as tar_handle:
-        for root, dirs, files in os.walk(path):
-            for file in files:
-                tar_handle.add(os.path.join(root, file))
-
-tardir(tarPath, tarFile)
-
-s3_client = boto3.resource('s3',
-                           endpoint_url='http://192.168.1.104:9000',
-                           aws_access_key_id='minio',
-                           aws_secret_access_key='minio123'
-                           )
-
 def create_bucket(bucket_name):
     response = s3_client.buckets.all()
     is_exist = False
@@ -181,9 +140,76 @@ def upload_file(file_name, bucket, object_name=None):
         return False
     return True
 
-create_bucket(bucket_name)
+def tardir(path, tar_name):
+    with tarfile.open(tar_name, "w:gz") as tar_handle:
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                # print(dirs)
+                tar_handle.add(os.path.join(root, file))
 
-upload_file(obj, bucket=bucket_name, object_name=tarFile)
+def untar(path):
+    with tarfile.open(path) as tar_handle:
+        tar_handle.extractall()
+        tar_handle.close()
+
+def DownloadObj(bucket,obj):
+    try:
+        s3_client.Bucket(bucket).download_file(obj, obj)
+    except ClientError as e:
+        if e.response['Error']['Code'] == "404":
+            print("The object does not exist.")
+            return False
+    return True
+
+iterative_process = tff.learning.build_federated_averaging_process(
+    model_fn,
+    client_optimizer_fn=lambda: optimizers.Adam(learning_rate=client_lr),
+    server_optimizer_fn=lambda: optimizers.SGD(learning_rate=server_lr))
+
+
+s3_client = boto3.resource('s3',
+                           endpoint_url='http://47.254.74.134:9000',
+                           aws_access_key_id='minio',
+                           aws_secret_access_key='minio123'
+                           )
+
+# filePath = root_path + str(bucket_name) + '/'
+# filePath = './'
+CurrentPath = os.getcwd()
+# os.chdir(filePath)
+# oldFolder = 'ckpt_'+ str(seq -1)
+oldObj = 'ckpt_'+ str(seq -1) + '.tar.gz'
+bucket = create_bucket(bucket_name)
+down = DownloadObj(bucket_name,oldObj)
+
+state = iterative_process.initialize()
+
+if down ==True:
+    untar(oldObj)
+    ckpt_manager = FileCheckpointManager(CurrentPath)
+    state = ckpt_manager.load_checkpoint(state,round_num=int(seq - 1))
+
+# for round_num in range(1, NUM_ROUNDS+1):
+state, tff_metrics = iterative_process.next(state, federated_train_data)
+# print('round {:2d}, metrics={}'.format(round_num, tff_metrics))
+
+ckpt_manager.save_checkpoint(state,round_num=int(seq))
+
+objFolder = 'ckpt_'+ str(seq)
+obj = 'ckpt_'+ str(seq) + '.tar.gz'
+
+tardir(objFolder, obj)
+
+# tarPath =  filePath + objFolder
+# tarFile = filePath  + obj
+
+upload_file(obj, bucket=bucket_name, object_name=obj)
+
+# shutil.rmtree(filePath)
+# print("folder %s has been removed" % tarPath)
+# state_new = iterative_process.initialize()
+# ckpt_manager = FileCheckpointManager(filePath)
+# state_new, num = ckpt_manager.load_latest_checkpoint(state_new)
 
 http = urllib3.PoolManager()
 resp = http.request(
@@ -195,3 +221,5 @@ resp = http.request(
     }
 )
 print(resp.data)
+
+
