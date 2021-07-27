@@ -44,13 +44,13 @@ PREFETCH_BUFFER = 10
 
 data_path = '/opt/train/'
 
-df_orig_train = pd.read_csv(data_path + 'mnist_train.csv')
-# df_orig_test = pd.read_csv('mnist_test.csv')
-print(df_orig_train.shape[0])
-x_train = df_orig_train.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_train.shape[0],28,28,1)[:300]
-y_train = df_orig_train.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_train.shape[0],1)[:300]
-# x_test = df_orig_test.iloc[:,1:].to_numpy().astype(np.float32).reshape(9999,28,28,1)[:10]
-# y_test = df_orig_test.iloc[:,0].to_numpy().astype(np.int32).reshape(9999,1)[:10]
+df_orig_train = pd.read_csv(data_path + 'data.csv')
+df_orig_test = pd.read_csv(data_path + 'mnist_test.csv')
+# print(df_orig_train.shape[0])
+x_train = df_orig_train.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_train.shape[0],28,28,1)[:1]
+y_train = df_orig_train.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_train.shape[0],1)[:1]
+x_test = df_orig_test.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_test.shape[0],28,28,1)[:10]
+y_test = df_orig_test.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_test.shape[0],1)[:10]
 
 total_image_count = len(x_train)
 image_per_set = int(np.floor(total_image_count/split))
@@ -157,67 +157,97 @@ def DownloadObj(bucket,obj):
             return False
     return True
 
+def download_dir(prefix, local, bucket, client):
+    """
+    params:
+    - prefix: pattern to match in s3
+    - local: local path to folder in which to place files
+    - bucket: s3 bucket with target contents
+    - client: initialized s3 client object
+    """
+    keys = []
+    dirs = []
+    next_token = ''
+    base_kwargs = {
+        'Bucket':bucket,
+        'Prefix':prefix,
+    }
+    while next_token is not None:
+        kwargs = base_kwargs.copy()
+        if next_token != '':
+            kwargs.update({'ContinuationToken': next_token})
+        results = client.list_objects_v2(**kwargs)
+        contents = results.get('Contents')
+        for i in contents:
+            k = i.get('Key')
+            if k[-1] != '/':
+                keys.append(k)
+            else:
+                dirs.append(k)
+        next_token = results.get('NextContinuationToken')
+    for d in dirs:
+        dest_pathname = os.path.join(local, d)
+        if not os.path.exists(os.path.dirname(dest_pathname)):
+            os.makedirs(os.path.dirname(dest_pathname))
+    for k in keys:
+        dest_pathname = os.path.join(local, k)
+        if not os.path.exists(os.path.dirname(dest_pathname)):
+            os.makedirs(os.path.dirname(dest_pathname))
+        client.download_file(bucket, k, dest_pathname)
+
+def untardir(path):
+    for path, directories, files in os.walk(path):
+        for f in files:
+            if f.endswith(".tar.gz"):
+                tar = tarfile.open(os.path.join(path,f), 'r:gz')
+                tar.extractall()
+                tar.close()
+
+
 iterative_process = tff.learning.build_federated_averaging_process(
     model_fn,
     client_optimizer_fn=lambda: optimizers.Adam(learning_rate=client_lr),
     server_optimizer_fn=lambda: optimizers.SGD(learning_rate=server_lr))
 
 
-s3_client = boto3.resource('s3',
-                           endpoint_url='http://192.168.1.104:9000',
-                           aws_access_key_id='minio',
-                           aws_secret_access_key='minio123'
-                           )
+s3_client = boto3.client('s3', endpoint_url='http://192.168.1.104:9000',
+                          aws_access_key_id='minio',
+                          aws_secret_access_key='minio123'
+                          )
 
-# filePath = root_path + str(bucket_name) + '/'
-# filePath = './'
-CurrentPath = os.getcwd()
-# os.chdir(filePath)
-# oldFolder = 'ckpt_'+ str(seq -1)
-oldObj = 'ckpt_'+ str(seq -1) + '.tar.gz'
-bucket = create_bucket(bucket_name)
-down = DownloadObj(bucket_name,oldObj)
+download_dir('ckpt_', "./", bucket_name, client=s3_client)
+#
+untardir("./")
 
-state = iterative_process.initialize()
+# tff_train_acc = []
+tff_val_acc = []
+# tff_train_loss = []
+tff_val_loss = []
 
-ckpt_manager = FileCheckpointManager(CurrentPath)
+eval_model = None
 
-if down ==True:
-    untar(oldObj)
-    state = ckpt_manager.load_checkpoint(state,round_num=int(seq - 1))
+# state.model.assign_weights_to(eval_model)
+# path = '/content'
+state_new = iterative_process.initialize()
 
-for round_num in range(1, NUM_ROUNDS+1):
-    state, tff_metrics = iterative_process.next(state, federated_train_data)
-    print('round {:2d}, metrics={}'.format(round_num, tff_metrics))
+ckpt_manager = FileCheckpointManager("./")
+eval_model = None
+for round_num in range(1,2):
+  # state, tff_metrics = iterative_process.next(state_new, federated_train_data)
+  # print('round {:2d}, metrics={}'.format(round_num, tff_metrics))
+  newstate = ckpt_manager.load_checkpoint(state_new,round_num=round_num)
+  eval_model = create_keras_model()
+  eval_model.compile(optimizer=optimizers.Adam(learning_rate=client_lr),
+                      loss=losses.SparseCategoricalCrossentropy(),
+                      metrics=[metrics.SparseCategoricalAccuracy()])
+  newstate.model.assign_weights_to(eval_model)
+  ev_result = eval_model.evaluate(x_test, y_test, verbose=0)
+  tff_val_acc.append(ev_result[1])
+  tff_val_loss.append(ev_result[0])
+  print(f"Eval loss : {ev_result[0]} and Eval accuracy : {ev_result[1]}")
 
-ckpt_manager.save_checkpoint(state,round_num=int(seq))
+metric_collection = {
+                     "val_sparse_categorical_accuracy": tff_val_acc,
+                     "val_loss": tff_val_loss}
 
-objFolder = 'ckpt_'+ str(seq)
-obj = 'ckpt_'+ str(seq) + '.tar.gz'
-
-tardir(objFolder, obj)
-
-# tarPath =  filePath + objFolder
-# tarFile = filePath  + obj
-
-upload_file(obj, bucket=bucket_name, object_name=obj)
-
-# shutil.rmtree(filePath)
-# print("folder %s has been removed" % tarPath)
-# state_new = iterative_process.initialize()
-# ckpt_manager = FileCheckpointManager(filePath)
-# state_new, num = ckpt_manager.load_latest_checkpoint(state_new)
-
-http = urllib3.PoolManager()
-resp = http.request(
-    "PUT",
-    "http://192.168.1.104:8000/task/" + task_name + '/',
-    fields={
-        "status": 1,
-        "output": obj
-    }
-)
-print(resp.data)
-
-
-
+print(metric_collection)
