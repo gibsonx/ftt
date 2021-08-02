@@ -28,29 +28,29 @@ tff.federated_computation(lambda: 'Hello, World!')()
 # task_name = os.environ.get('task')
 # bucket_name = str(os.environ.get('uuid'))
 
-#if seq is None:
+# if seq is None:
 seq = 1
 task_name = "gibson"
-bucket_name = "16be5162-eb3f-11eb-9a03-0242ac130007"
+bucket_name = "beefa088-da23-4434-943f-12900ed84e86"
 #
 method = "tff_training"
 client_lr = 1e-2
 server_lr = 1e-2
 split = 1
-NUM_ROUNDS = 30
-NUM_EPOCHS = 1
+NUM_ROUNDS = 10
+NUM_EPOCHS = 2
 BATCH_SIZE = 1
 PREFETCH_BUFFER = 10
 
 data_path = '/opt/train/'
 
-df_orig_train = pd.read_csv(data_path + 'data.csv')
+df_orig_train = pd.read_csv(data_path + 'mnist_train.csv')
 df_orig_test = pd.read_csv(data_path + 'mnist_test.csv')
 # print(df_orig_train.shape[0])
 x_train = df_orig_train.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_train.shape[0],28,28,1)[:1]
 y_train = df_orig_train.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_train.shape[0],1)[:1]
-x_test = df_orig_test.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_test.shape[0],28,28,1)[:10]
-y_test = df_orig_test.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_test.shape[0],1)[:10]
+x_test = df_orig_test.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_test.shape[0],28,28,1)[:10000]
+y_test = df_orig_test.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_test.shape[0],1)[:10000]
 
 total_image_count = len(x_train)
 image_per_set = int(np.floor(total_image_count/split))
@@ -216,7 +216,7 @@ s3_client = boto3.client('s3', endpoint_url='http://192.168.1.104:9000',
                           )
 
 download_dir('ckpt_', "./", bucket_name, client=s3_client)
-#
+
 untardir("./")
 
 # tff_train_acc = []
@@ -232,19 +232,29 @@ state_new = iterative_process.initialize()
 
 ckpt_manager = FileCheckpointManager("./")
 eval_model = None
-for round_num in range(1,2):
-  # state, tff_metrics = iterative_process.next(state_new, federated_train_data)
-  # print('round {:2d}, metrics={}'.format(round_num, tff_metrics))
-  newstate = ckpt_manager.load_checkpoint(state_new,round_num=round_num)
-  eval_model = create_keras_model()
-  eval_model.compile(optimizer=optimizers.Adam(learning_rate=client_lr),
+for round_num in range(1,5):
+    print(round_num)
+    newstate = ckpt_manager.load_checkpoint(state_new,round_num=round_num)
+    eval_model = create_keras_model()
+    eval_model.compile(optimizer=optimizers.Adam(learning_rate=client_lr),
                       loss=losses.SparseCategoricalCrossentropy(),
                       metrics=[metrics.SparseCategoricalAccuracy()])
-  newstate.model.assign_weights_to(eval_model)
-  ev_result = eval_model.evaluate(x_test, y_test, verbose=0)
-  tff_val_acc.append(ev_result[1])
-  tff_val_loss.append(ev_result[0])
-  print(f"Eval loss : {ev_result[0]} and Eval accuracy : {ev_result[1]}")
+    newstate.model.assign_weights_to(eval_model)
+    ev_result = eval_model.evaluate(x_test, y_test, verbose=0)
+    tff_val_acc.append(ev_result[1])
+    tff_val_loss.append(ev_result[0])
+    print(f"Eval loss : {ev_result[0]} and Eval accuracy : {ev_result[1]}")
+
+# newstate = ckpt_manager.load_checkpoint(state_new,round_num=9)
+# eval_model = create_keras_model()
+# eval_model.compile(optimizer=optimizers.Adam(learning_rate=client_lr),
+#                   loss=losses.SparseCategoricalCrossentropy(),
+#                   metrics=[metrics.SparseCategoricalAccuracy()])
+# newstate.model.assign_weights_to(eval_model)
+# ev_result = eval_model.evaluate(x_test, y_test, verbose=0)
+# tff_val_acc.append(ev_result[1])
+# tff_val_loss.append(ev_result[0])
+# print(f"Eval loss : {ev_result[0]} and Eval accuracy : {ev_result[1]}")
 
 metric_collection = {
                      "val_sparse_categorical_accuracy": tff_val_acc,

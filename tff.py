@@ -1,54 +1,60 @@
 import collections
+import nest_asyncio
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 import tensorflow_federated as tff
-import pandas as pd
-
-from tensorflow import reshape, nest, config
-from tensorflow.keras import losses, metrics, optimizers
+from tensorflow import reshape, nest
 # Test the TFF is working:
 from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Dense, Dropout, Flatten, Conv2D, MaxPool2D, MaxPooling2D
-import nest_asyncio
+from tensorflow.keras import losses, metrics, optimizers
+from tensorflow.keras.layers import Dense, Dropout, Flatten, Conv2D, MaxPooling2D
+
 nest_asyncio.apply()
 import os
-import secrets
 import logging
 import boto3
-from botocore.client import Config,ClientError
+from botocore.client import ClientError
 import tarfile
 import urllib3
-import shutil
 from tensorflow_federated.python.simulation import FileCheckpointManager
 
 print(tf.__version__)
 tff.federated_computation(lambda: 'Hello, World!')()
 
-# seq = os.environ.get('seq')
-# task_name = os.environ.get('task')
-# bucket_name = str(os.environ.get('uuid'))
+#S3_storage##
+endpoint = 'http://192.168.1.104:9000'
+access_key = 'minio'
+access_secret = 'minio123'
 
-#if seq is None:
-seq = 1
-task_name = "gibson"
-bucket_name = "16be5162-eb3f-11eb-9a03-0242ac130007"
+#Scheduler
+scheduler_url = 'http://192.168.1.104:8000'
+
+seq = int(os.environ.get('seq'))
+task_name = os.environ.get('task')
+bucket_name = str(os.environ.get('uuid'))
+
+#
+# seq = 1
+# task_name = "gibson"
+# bucket_name = "16be5162-eb3f-11eb-9a03-0242ac130007"
 #
 method = "tff_training"
 client_lr = 1e-2
 server_lr = 1e-2
 split = 1
-NUM_ROUNDS = 30
+NUM_ROUNDS = 20
 NUM_EPOCHS = 1
 BATCH_SIZE = 1
 PREFETCH_BUFFER = 10
 
 data_path = '/opt/train/'
 
-df_orig_train = pd.read_csv(data_path + 'mnist_train.csv')
+df_orig_train = pd.read_csv(data_path + 'data.csv')
 # df_orig_test = pd.read_csv('mnist_test.csv')
 print(df_orig_train.shape[0])
-x_train = df_orig_train.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_train.shape[0],28,28,1)[:300]
-y_train = df_orig_train.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_train.shape[0],1)[:300]
+x_train = df_orig_train.iloc[:,1:].to_numpy().astype(np.float32).reshape(df_orig_train.shape[0],28,28,1)
+y_train = df_orig_train.iloc[:,0].to_numpy().astype(np.int32).reshape(df_orig_train.shape[0],1)
 # x_test = df_orig_test.iloc[:,1:].to_numpy().astype(np.float32).reshape(9999,28,28,1)[:10]
 # y_test = df_orig_test.iloc[:,0].to_numpy().astype(np.int32).reshape(9999,1)[:10]
 
@@ -164,16 +170,13 @@ iterative_process = tff.learning.build_federated_averaging_process(
 
 
 s3_client = boto3.resource('s3',
-                           endpoint_url='http://192.168.1.104:9000',
-                           aws_access_key_id='minio',
-                           aws_secret_access_key='minio123'
+                           endpoint_url=endpoint,
+                           aws_access_key_id=access_key,
+                           aws_secret_access_key=access_secret
                            )
 
-# filePath = root_path + str(bucket_name) + '/'
-# filePath = './'
 CurrentPath = os.getcwd()
-# os.chdir(filePath)
-# oldFolder = 'ckpt_'+ str(seq -1)
+
 oldObj = 'ckpt_'+ str(seq -1) + '.tar.gz'
 bucket = create_bucket(bucket_name)
 down = DownloadObj(bucket_name,oldObj)
@@ -185,6 +188,9 @@ ckpt_manager = FileCheckpointManager(CurrentPath)
 if down ==True:
     untar(oldObj)
     state = ckpt_manager.load_checkpoint(state,round_num=int(seq - 1))
+    print("parameters is imported")
+else:
+    print("no model parameters is donwloaded")
 
 for round_num in range(1, NUM_ROUNDS+1):
     state, tff_metrics = iterative_process.next(state, federated_train_data)
@@ -197,27 +203,20 @@ obj = 'ckpt_'+ str(seq) + '.tar.gz'
 
 tardir(objFolder, obj)
 
-# tarPath =  filePath + objFolder
-# tarFile = filePath  + obj
-
 upload_file(obj, bucket=bucket_name, object_name=obj)
-
-# shutil.rmtree(filePath)
-# print("folder %s has been removed" % tarPath)
-# state_new = iterative_process.initialize()
-# ckpt_manager = FileCheckpointManager(filePath)
-# state_new, num = ckpt_manager.load_latest_checkpoint(state_new)
 
 http = urllib3.PoolManager()
 resp = http.request(
     "PUT",
-    "http://192.168.1.104:8000/task/" + task_name + '/',
+    scheduler_url + '/task/' + task_name + '/',
     fields={
         "status": 1,
         "output": obj
     }
 )
 print(resp.data)
-
-
-
+resp = http.request(
+    "GET",
+    scheduler_url + '/jobrun/' + bucket_name + '/'
+)
+print(resp.data)
